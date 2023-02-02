@@ -1,38 +1,114 @@
+
+
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
-
-# ROS2 rclpy -- Ar-Ray-code 2021
-
+import sys
+sys.path.append('/home/hzkd/YOLOX') #改成自己YOLOX的路径
+import argparse
 import os
 import time
 from loguru import logger
 
 import cv2
-from numpy import empty
-
 import torch
-import torch.backends.cudnn as cudnn
 
-from yolox.data.data_augment import preproc
+from yolox.data.data_augment import ValTransform
 from yolox.data.datasets import COCO_CLASSES
 from yolox.exp import get_exp
-from yolox.utils import fuse_model, get_model_info, postprocess, setup_logger, vis
-
-import rospy
-
-from std_msgs.msg import Header
-from cv_bridge import CvBridge
-from sensor_msgs.msg import Image
+from yolox.utils import fuse_model, get_model_info, postprocess, vis
 
 from bboxes_ex_msgs.msg import BoundingBoxes
 from bboxes_ex_msgs.msg import BoundingBox
+#载入bounding boxes
 
-# from darknet_ros_msgs.msg import BoundingBoxes
-# from darknet_ros_msgs.msg import BoundingBox
+IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
+
+import rospy
+from sensor_msgs.msg import Image
+from std_msgs.msg import Header
+from ros_numpy.image import image_to_numpy, numpy_to_image
+
+
+def make_parser():
+    parser = argparse.ArgumentParser("YOLOX Demo!")
+    parser.add_argument(
+        "demo", default="image", help="demo type, eg. image, video and webcam"
+    )
+    parser.add_argument("-expn", "--experiment-name", type=str, default=None)
+    parser.add_argument("-n", "--name", type=str, default=None, help="model name")
+
+    parser.add_argument(
+        "--path", default="./assets/dog.jpg", help="path to images or video"
+    )
+    parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
+    parser.add_argument(
+        "--save_result",
+        action="store_true",
+        help="whether to save the inference result of image/video",
+    )
+
+    # exp file
+    parser.add_argument(
+        "-f",
+        "--exp_file",
+        default=None,
+        type=str,
+        help="please input your experiment description file",
+    )
+    parser.add_argument("-c", "--ckpt", default=None, type=str, help="ckpt for eval")
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        type=str,
+        help="device to run our model, can either be cpu or gpu",
+    )
+    parser.add_argument("--conf", default=0.3, type=float, help="test conf")
+    parser.add_argument("--nms", default=0.3, type=float, help="test nms threshold")
+    parser.add_argument("--tsize", default=None, type=int, help="test img size")
+    parser.add_argument(
+        "--fp16",
+        dest="fp16",
+        default=False,
+        action="store_true",
+        help="Adopting mix precision evaluating.",
+    )
+    parser.add_argument(
+        "--legacy",
+        dest="legacy",
+        default=False,
+        action="store_true",
+        help="To be compatible with older versions",
+    )
+    parser.add_argument(
+        "--fuse",
+        dest="fuse",
+        default=False,
+        action="store_true",
+        help="Fuse conv and bn for testing.",
+    )
+    parser.add_argument(
+        "--trt",
+        dest="trt",
+        default=False,
+        action="store_true",
+        help="Using TensorRT model for testing.",
+    )
+    return parser
+
 
 class Predictor(object):
-    def __init__(self, model, exp, cls_names=COCO_CLASSES, trt_file=None, decoder=None):
+    def __init__(
+        self,
+        model,
+        exp,
+        cls_names=COCO_CLASSES,
+        trt_file=None,
+        decoder=None,
+        device="cpu",
+        fp16=False,
+        legacy=False,
+    ):
         self.model = model
         self.cls_names = cls_names
         self.decoder = decoder
@@ -40,42 +116,54 @@ class Predictor(object):
         self.confthre = exp.test_conf
         self.nmsthre = exp.nmsthre
         self.test_size = exp.test_size
+        self.device = device
+        self.fp16 = fp16
+        self.preproc = ValTransform(legacy=legacy)
         if trt_file is not None:
             from torch2trt import TRTModule
+
             model_trt = TRTModule()
             model_trt.load_state_dict(torch.load(trt_file))
 
             x = torch.ones(1, 3, exp.test_size[0], exp.test_size[1]).cuda()
             self.model(x)
             self.model = model_trt
-        self.rgb_means = (0.485, 0.456, 0.406)
-        self.std = (0.229, 0.224, 0.225)
 
     def inference(self, img):
-        img_info = {'id': 0}
+        img_info = {"id": 0}
         if isinstance(img, str):
-            img_info['file_name'] = os.path.basename(img)
+            img_info["file_name"] = os.path.basename(img)
             img = cv2.imread(img)
         else:
-            img_info['file_name'] = None
+            img_info["file_name"] = None
 
         height, width = img.shape[:2]
-        img_info['height'] = height
-        img_info['width'] = width
-        img_info['raw_img'] = img
+        img_info["height"] = height
+        img_info["width"] = width
+        img_info["raw_img"] = img
 
-        img, ratio = preproc(img, self.test_size, self.rgb_means, self.std)
-        img_info['ratio'] = ratio
-        img = torch.from_numpy(img).unsqueeze(0).cuda()
+        ratio = min(self.test_size[0] / img.shape[0], self.test_size[1] / img.shape[1])
+        img_info["ratio"] = ratio
 
+        img, _ = self.preproc(img, None, self.test_size)
+        img = torch.from_numpy(img).unsqueeze(0)
+        img = img.float()
+        if self.device == "gpu":
+            img = img.cuda()
+            if self.fp16:
+                img = img.half()  # to FP16
+
+        t0 = time.time()
         with torch.no_grad():
-            t0 = time.time()
             outputs = self.model(img)
             if self.decoder is not None:
                 outputs = self.decoder(outputs, dtype=outputs.type())
             outputs = postprocess(
-                        outputs, self.num_classes, self.confthre, self.nmsthre
-                    )
+                outputs, self.num_classes, self.confthre,
+                self.nmsthre, class_agnostic=True
+            )
+        logger.info("Infer time: {:.4f}s".format(time.time() - t0))
+
         return outputs, img_info
 
     def visual(self, output, img_info, cls_conf=0.35):
@@ -96,91 +184,13 @@ class Predictor(object):
         vis_res = vis(img, bboxes, scores, cls, cls_conf, self.cls_names)
         return vis_res, bboxes, scores, cls, self.cls_names
 
-class yolox_ros():
-    def __init__(self) -> None:
 
-        # ROS1 init
-
-        self.setting_yolox_exp()
-
-        self.bridge = CvBridge()
-        
-        self.pub = rospy.Publisher('yolox/bounding_boxes', BoundingBoxes)
-        self.pub_image = rospy.Publisher("yolox/image_raw",Image)
-        rospy.Subscriber("image_raw",Image,self.imageflow_callback)
-
-        rospy.spin()
-
-    def setting_yolox_exp(self) -> None:
-        # set environment variables for distributed training
-        
-        # ==============================================================
-
-        WEIGHTS_PATH = '../../weights/yolox_s.pth'
-
-        # =============================================================
-        self.imshow_isshow = rospy.get_param('imshow_isshow', True)
-
-        yolo_type = rospy.get_param('~yolo_type', 'yolox-s')
-        fuse = rospy.get_param('~fuse', False)
-        trt = rospy.get_param('~trt', False)
-        rank = rospy.get_param('~rank', 0)
-        ckpt_file = rospy.get_param('~ckpt_file', WEIGHTS_PATH)
-        conf = rospy.get_param('~conf', 0.3)
-        nmsthre = rospy.get_param('~nmsthre', 0.65)
-        img_size = rospy.get_param('~img_size', 640)
-        self.input_width = rospy.get_param('~image_size/width', 360)
-        self.input_height = rospy.get_param('~image_size/height', 240)
-
-        # ==============================================================
-
-        cudnn.benchmark = True
-
-        exp = get_exp(None, yolo_type)
-
-        BASE_PATH = os.getcwd()
-        file_name = os.path.join(BASE_PATH, "YOLOX_PATH/")
-        # os.makedirs(file_name, exist_ok=True)
-
-        exp.test_conf = conf # test conf
-        exp.nmsthre = nmsthre # nms threshold
-        exp.test_size = (img_size, img_size) # Resize size
-
-        model = exp.get_model()
-        logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
-
-        torch.cuda.set_device(rank)
-        model.cuda(rank)
-        model.eval()
-
-        if not trt:
-            logger.info("loading checkpoint")
-            loc = "cuda:{}".format(rank)
-            ckpt = torch.load(ckpt_file, map_location=loc)
-            # load the model state dict
-            model.load_state_dict(ckpt["model"])
-            logger.info("loaded checkpoint done.")
-
-        if fuse:
-            logger.info("\tFusing model...")
-            model = fuse_model(model)
-
-        # TensorRT
-        if trt:
-            assert (not fuse),\
-                "TensorRT model is not support model fusing!"
-            trt_file = os.path.join(file_name, "model_trt.pth")
-            assert os.path.exists(trt_file), (
-                "TensorRT model is not found!\n Run python3 tools/trt.py first!"
-            )
-            model.head.decode_in_inference = False
-            decoder = model.head.decode_outputs
-            logger.info("Using TensorRT to inference")
-        else:
-            trt_file = None
-            decoder = None
-
-        self.predictor = Predictor(model, exp, COCO_CLASSES, trt_file, decoder)
+class YoloxRos(object):
+    def __init__(self, predictor):
+        self.predictor = predictor
+        self.image_subscriber = rospy.Subscriber('/airsim_node/drone_1/front_center/Scene', Image, callback=self.image_callback, queue_size=1)
+        self.pub = rospy.Publisher('yolox/bounding_boxes', BoundingBoxes, queue_size=1)
+        self.pub_image = rospy.Publisher("yolox/image_raw",Image, queue_size=1)
 
     def yolox2bboxes_msgs(self, bboxes, scores, cls, cls_names, img_header:Header):
         bboxes_msg = BoundingBoxes()
@@ -188,10 +198,10 @@ class yolox_ros():
         i = 0
         for bbox in bboxes:
             one_box = BoundingBox()
-            one_box.xmin = int(bbox[0])
-            one_box.ymin = int(bbox[1])
-            one_box.xmax = int(bbox[2])
-            one_box.ymax = int(bbox[3])
+            one_box.xmin = abs(int(bbox[0]))
+            one_box.ymin = abs(int(bbox[1]))
+            one_box.xmax = abs(int(bbox[2]))
+            one_box.ymax = abs(int(bbox[3]))
             one_box.probability = float(scores[i])
             one_box.class_id = str(cls_names[int(cls[i])])
             bboxes_msg.bounding_boxes.append(one_box)
@@ -199,35 +209,91 @@ class yolox_ros():
         
         return bboxes_msg
 
-    def imageflow_callback(self,msg:Image) -> None:
-        try:
-            img_rgb = self.bridge.imgmsg_to_cv2(msg,"bgr8")
-            img_rgb = cv2.resize(img_rgb,(self.input_width,self.input_height))
+    def image_callback(self, msg:Image):
+        image = image_to_numpy(msg)
+        outputs, img_info = self.predictor.inference(image)
+        # result_image = self.predictor.visual(outputs[0], img_info, self.predictor.confthre)
 
-            outputs, img_info = self.predictor.inference(img_rgb)
+        result_image, bboxes, scores, cls, cls_names = self.predictor.visual(outputs[0], img_info)
+        bboxes = self.yolox2bboxes_msgs(bboxes, scores, cls, cls_names, msg.header)
 
-            try:
-                result_img_rgb, bboxes, scores, cls, cls_names = self.predictor.visual(outputs[0], img_info)
-                bboxes = self.yolox2bboxes_msgs(bboxes, scores, cls, cls_names, msg.header)
+        self.pub.publish(bboxes)
+        self.pub_image.publish(numpy_to_image(result_image, encoding='bgr8'))
 
-                self.pub.publish(bboxes)
-                self.pub_image.publish(self.bridge.cv2_to_imgmsg(img_rgb,"bgr8"))
-
-                if (self.imshow_isshow):
-                    cv2.imshow("YOLOX", result_img_rgb)
-                    cv2.waitKey(10)
-            except:
-                if (self.imshow_isshow):
-                    cv2.imshow("YOLOX",img_rgb)
-                    cv2.waitKey(10)
-
-        except:
-            pass
-
-def ros_main(args = None) -> None:
-    rospy.init_node("yolox_ros",argv=args)
-    yolox_ros()
-    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    ros_main()
+    # https://github.com/Megvii-BaseDetection/YOLOX
+    '''
+    python3 ros_detection/yolox_ros.py image -n yolox-nano -c /home/dl/yolox_nano.pth --path zzz --device gpu
+    '''
+    args = make_parser().parse_args()
+    exp = get_exp(args.exp_file, args.name)
+
+    if not args.experiment_name:
+        args.experiment_name = exp.exp_name
+
+    file_name = os.path.join(exp.output_dir, args.experiment_name)
+    os.makedirs(file_name, exist_ok=True)
+
+    vis_folder = None
+    if args.save_result:
+        vis_folder = os.path.join(file_name, "vis_res")
+        os.makedirs(vis_folder, exist_ok=True)
+
+    if args.trt:
+        args.device = "gpu"
+
+    logger.info("Args: {}".format(args))
+
+    if args.conf is not None:
+        exp.test_conf = args.conf
+    if args.nms is not None:
+        exp.nmsthre = args.nms
+    if args.tsize is not None:
+        exp.test_size = (args.tsize, args.tsize)
+
+    model = exp.get_model()
+    logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
+
+    if args.device == "gpu":
+        model.cuda()
+        if args.fp16:
+            model.half()  # to FP16
+    model.eval()
+
+    if not args.trt:
+        if args.ckpt is None:
+            ckpt_file = os.path.join(file_name, "best_ckpt.pth")
+        else:
+            ckpt_file = args.ckpt
+        logger.info("loading checkpoint")
+        ckpt = torch.load(ckpt_file, map_location="cpu")
+        # load the model state dict
+        model.load_state_dict(ckpt["model"])
+        logger.info("loaded checkpoint done.")
+
+    if args.fuse:
+        logger.info("\tFusing model...")
+        model = fuse_model(model)
+
+    if args.trt:
+        assert not args.fuse, "TensorRT model is not support model fusing!"
+        trt_file = os.path.join(file_name, "model_trt.pth")
+        assert os.path.exists(
+            trt_file
+        ), "TensorRT model is not found!\n Run python3 tools/trt.py first!"
+        model.head.decode_in_inference = False
+        decoder = model.head.decode_outputs
+        logger.info("Using TensorRT to inference")
+    else:
+        trt_file = None
+        decoder = None
+
+    predictor = Predictor(
+        model, exp, COCO_CLASSES, trt_file, decoder,
+        args.device, args.fp16, args.legacy,
+    )
+
+    rospy.init_node('yolox_ros')
+    yolox_ros = YoloxRos(predictor=predictor)
+    rospy.spin()
