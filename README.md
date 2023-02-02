@@ -12,14 +12,13 @@ Japanese Reference (Plan to post)：[Qiita](https://qiita.com/Ar-Ray)
 ## Requirements (Python)
 
 - ROS1 Noetic
-- CUDA 10.2
+- CUDA 11.6.55 (U could run this program in Ur CPU device, but if CUDA, quicker)
 - OpenCV 4.5.1
-- Python 3.8 (Ubuntu 20.04 Default)
-- Torch '1.9.0+cu102 (Install with pytorch)
+- Python 3.9 (Ubuntu 20.04 Default)
 - cuDNN 7.6.5 (Install with pytorch)
 - [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX)
 - TensorRT : is not supported
-- WebCamera : v4l2_camera
+- ~~WebCamera : v4l2_camera ~~
 
 ## Requirements (C++)
 
@@ -69,6 +68,14 @@ roslaunch yolox_ros_py demo_yolox_s.launch
 roslaunch yolox_ros_py demo_yolox_l.launch
 ```
 
+---
+
+```
+Update:
+# Example  : YOLOX-nano demo
+python3 ros_detection/yolox_ros.py image -n yolox-nano -c /home/dl/yolox_nano.pth --device gpu
+```
+
 
 
 ---
@@ -76,7 +83,7 @@ roslaunch yolox_ros_py demo_yolox_l.launch
 ## Topic
 ### Subscribe
 
-- image_raw (`sensor_msgs/Image`)
+- image_raw (`/airsim_node/drone_1/front_center/Scene`)
 
 ### Publish
 
@@ -120,6 +127,7 @@ roslaunch yolox_ros_py demo_yolox_l.launch
 
 ## About writer
 
+- Nobody-Zhang : Chinese student, HUST.
 - Ar-Ray : Japanese student.
 - Blog (Japanese) : https://ar-ray.hatenablog.com/
 - Twitter : https://twitter.com/Ray255Ar
