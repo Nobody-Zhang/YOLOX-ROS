@@ -1,5 +1,3 @@
-
-
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
@@ -224,7 +222,7 @@ class YoloxRos(object):
 if __name__ == "__main__":
     # https://github.com/Megvii-BaseDetection/YOLOX
     '''
-    python3 ros_detection/yolox_ros.py image -n yolox-nano -c /home/dl/yolox_nano.pth --path zzz --device gpu
+    python3 ros_detection/yolox_ros.py image -n yolox-nano -c /home/dl/yolox_nano.pth --device gpu
     '''
     args = make_parser().parse_args()
     exp = get_exp(args.exp_file, args.name)
