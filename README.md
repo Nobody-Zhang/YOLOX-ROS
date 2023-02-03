@@ -1,3 +1,5 @@
+# 并没有完善好QAQ，咕咕咕一会儿
+
 # YOLOX-ROS
 
 [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX) + ROS1 Noetic (cuda 10.2)
