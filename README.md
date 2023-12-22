@@ -1,4 +1,4 @@
-# 并没有完善好QAQ，咕咕咕一会儿
+# FINISHED
 
 # YOLOX-ROS
 
